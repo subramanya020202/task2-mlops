@@ -1,45 +1,101 @@
-import pandas as pd
-import matplotlib.pyplot as plt
 import os
+import shutil
+import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.io as pio
+import base64
+from io import BytesIO
 
 def prepare_data(data):
-   
+    """
+    Prepare data for drift analysis by converting date and extracting monthly means.
+    """
     data['Date'] = pd.to_datetime(data['Date'])
     data['Year-Month'] = data['Date'].dt.to_period('M')
     monthly_mean = data.groupby('Year-Month').mean()
     monthly_mean.index = monthly_mean.index.astype(str)
     return monthly_mean
 
-def generate_drift_plot(reference_mean, current_mean, column, plot_dir):
-    
+def generate_drift_plot(reference_mean, current_mean, column):
+    """
+    Generate drift plot for a specific column and return as HTML for interactivity.
+    """
     mean_val = reference_mean[column].mean()
     std_val = reference_mean[column].std()
 
-    plt.figure(figsize=(10, 6))
-    plt.fill_between(current_mean.index, mean_val + std_val, mean_val - std_val, 
-                     color='green', alpha=0.2, label='Reference Mean ± SD Range')
-    plt.plot(current_mean.index, current_mean[column], 
-             label=f'Monthly Average {column}', marker='o', color='red')
-    plt.axhline(mean_val, color='green', linestyle='-', linewidth=1, label='Mean')
-    plt.axhline(mean_val + std_val, color='blue', linestyle='--', linewidth=1, label='Mean + SD')
-    plt.axhline(mean_val - std_val, color='blue', linestyle='--', linewidth=1, label='Mean - SD')
-    plt.title(f'Monthly Average {column} with SD Bands', fontsize=16)
-    plt.xlabel('Month', fontsize=12)
-    plt.ylabel(f'{column}', fontsize=12)
-    plt.xticks(rotation=45, fontsize=10)
-    plt.legend()
-    plt.tight_layout()
+    fig = go.Figure()
 
-    plot_path = os.path.join(plot_dir, f'{column}_plot.png')
-    plt.savefig(plot_path)
-    plt.close()
+    fig.add_trace(go.Scatter(
+        x=current_mean.index,
+        y=[mean_val + std_val] * len(current_mean.index),
+        mode='lines',
+        line=dict(width=0),
+        showlegend=False,
+        hoverinfo='skip',
+    ))
+    fig.add_trace(go.Scatter(
+        x=current_mean.index,
+        y=[mean_val - std_val] * len(current_mean.index),
+        mode='lines',
+        fill='tonexty',
+        fillcolor='rgba(0, 255, 0, 0.2)',
+        line=dict(width=0),
+        name='Mean ± SD Range',
+        hoverinfo='skip',
+    ))
+    fig.add_trace(go.Scatter(
+        x=current_mean.index,
+        y=current_mean[column],
+        mode='lines+markers',
+        line=dict(color='red', width=2),
+        marker=dict(size=6),
+        name=f'Monthly Average {column}',
+        hovertemplate='%{y:.2f}<extra></extra>',
+    ))
+    fig.add_trace(go.Scatter(
+        x=current_mean.index,
+        y=[mean_val] * len(current_mean.index),
+        mode='lines',
+        line=dict(color='green', width=1),
+        name='Mean',
+        hoverinfo='skip',
+    ))
+    fig.add_trace(go.Scatter(
+        x=current_mean.index,
+        y=[mean_val + std_val] * len(current_mean.index),
+        mode='lines',
+        line=dict(color='blue', dash='dash', width=1),
+        name='Mean + SD',
+        hoverinfo='skip',
+    ))
+    fig.add_trace(go.Scatter(
+        x=current_mean.index,
+        y=[mean_val - std_val] * len(current_mean.index),
+        mode='lines',
+        line=dict(color='blue', dash='dash', width=1),
+        name='Mean - SD',
+        hoverinfo='skip',
+    ))
 
-    return plot_path
+    fig.update_layout(
+        title=f'Monthly Average {column} with SD Bands',
+        xaxis_title='Month',
+        yaxis_title=f'{column}',
+        template='plotly_white',
+        legend=dict(title="Legend"),
+        xaxis=dict(tickangle=45),
+        hovermode='x unified',
+    )
 
-def generate_distribution_plot(reference_mean, current_mean, column, plot_dir):
- 
+    # Generate the Plotly figure as an HTML div (interactive)
+    fig_html = pio.to_html(fig, full_html=False)
+    return fig_html
+
+def generate_distribution_plot(reference_mean, current_mean, column):
+    """
+    Generate distribution plot using Plotly and return as HTML for interactivity.
+    """
     if not np.issubdtype(reference_mean[column].dtype, np.number):
         print(f"Skipping non-numeric column: {column}")
         return None
@@ -56,13 +112,13 @@ def generate_distribution_plot(reference_mean, current_mean, column, plot_dir):
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=bin_midpoints,
-        y=current_counts * 50,
+        y=current_counts,
         name="Current",
         marker_color='red'
     ))
     fig.add_trace(go.Bar(
         x=bin_midpoints,
-        y=reference_counts * 50,
+        y=reference_counts,
         name="Reference",
         marker_color='gray'
     ))
@@ -76,45 +132,72 @@ def generate_distribution_plot(reference_mean, current_mean, column, plot_dir):
         legend=dict(title="Group")
     )
 
-    fig_path = os.path.join(plot_dir, f"{column}_data_distribution.html")
-    fig.write_html(fig_path)
-
-    return fig_path
+    # Generate the Plotly figure as an HTML div (interactive)
+    fig_html = pio.to_html(fig, full_html=False)
+    return fig_html
 
 def generate_drift_report(reference_data, current_data, drift_results):
-    
-    plot_dir = 'plots'
-    os.makedirs(plot_dir, exist_ok=True)
-
+    """
+    Generate an HTML report based on drift analysis with embedded interactive plots.
+    """
     reference_mean_monthly = prepare_data(reference_data)
     current_mean_monthly = prepare_data(current_data)
 
-    html_content = """
+    drift_detected = []
+    no_drift_detected = []
+
+    # Classify columns based on drift detection
+    for column in reference_mean_monthly.select_dtypes(include=[np.number]).columns:
+        if drift_results.get(column, {}).get('Threshold Breach', False):
+            drift_detected.append(column)
+        else:
+            no_drift_detected.append(column)
+
+    # HTML Report Header
+    html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Data Drift Report</title>
         <style>
-            body { font-family: Arial, sans-serif; }
-            .container { width: 80%; margin: auto; }
-            .column { margin-bottom: 40px; }
-            .column h2 { border-bottom: 1px solid #ddd; padding-bottom: 10px; }
-            .column img { width: 100%; height: auto; }
-            .column iframe { width: 100%; height: 400px; border: none; }
+            body {{ font-family: Arial, sans-serif; }}
+            .container {{ width: 80%; margin: auto; }}
+            .column {{ margin-bottom: 40px; }}
+            .column h2 {{ border-bottom: 1px solid #ddd; padding-bottom: 10px; }}
+            .column img {{ width: 100%; height: auto; }}
+            table {{ width: 100%; border-collapse: collapse; margin-bottom: 40px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
         </style>
     </head>
     <body>
         <div class="container">
             <h1>Data Drift Report</h1>
             <p>Algorithm Used: Statistical Drift Detection</p>
+            <h2>Summary of Drift Detection</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Drift Detected</th>
+                        <th>No Drift Detected</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>{', '.join(drift_detected)}</td>
+                        <td>{', '.join(no_drift_detected)}</td>
+                    </tr>
+                </tbody>
+            </table>
     """
 
+    # Generate report for each column
     for column in reference_mean_monthly.select_dtypes(include=[np.number]).columns:
         try:
-            plot_path = generate_drift_plot(reference_mean_monthly, current_mean_monthly, column, plot_dir)
-            distribution_path = generate_distribution_plot(reference_mean_monthly, current_mean_monthly, column, plot_dir)
+            drift_plot_html = generate_drift_plot(reference_mean_monthly, current_mean_monthly, column)
+            distribution_plot_html = generate_distribution_plot(reference_mean_monthly, current_mean_monthly, column)
 
-            if plot_path and distribution_path:
+            if drift_plot_html and distribution_plot_html:
                 test_name = drift_results.get(column, {}).get('Test Name', 'N/A')
                 drift_metric = drift_results.get(column, {}).get('Drift Metric', 'N/A')
                 threshold_breach = drift_results.get(column, {}).get('Threshold Breach', 'N/A')
@@ -125,9 +208,10 @@ def generate_drift_report(reference_data, current_data, drift_results):
                     <p>Test Name: {test_name}</p>
                     <p>Drift Metric: {drift_metric}</p>
                     <p>Threshold Breach: {threshold_breach}</p>
-                    <img src="{plot_path}" alt="Data Drift in {column}">
+                    <h3>Drift Plot</h3>
+                    {drift_plot_html}
                     <h3>Data Distribution (Current vs. Reference)</h3>
-                    <iframe src="{distribution_path}"></iframe>
+                    {distribution_plot_html}
                 </div>
                 """
         except Exception as e:
@@ -139,8 +223,15 @@ def generate_drift_report(reference_data, current_data, drift_results):
     </html>
     """
 
+    # Save the report as an HTML file
     html_report_path = 'data_drift_report.html'
     with open(html_report_path, 'w') as file:
         file.write(html_content)
 
     print(f"Report saved as {html_report_path}")
+
+    # Clean up: Delete the 'plots' folder after generating the report
+    plots_folder = 'plots'
+    if os.path.exists(plots_folder):
+        shutil.rmtree(plots_folder)
+    return html_report_path
