@@ -1,11 +1,12 @@
 import pandas as pd
-from tests import (
+from algorithms import (
     run_anderson_darling,
     run_ks_test,
     run_wasserstein_distance,
     run_js_divergence,
     run_chi_squared_test,
 )
+
 
 class DriftDetection:
     """
